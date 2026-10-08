@@ -1,0 +1,463 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create project files
+        run: |
+          mkdir -p BoostTracker
+          cat > BoostTracker/README.md <<'BT_EOF'
+          # Boost Tracker (Android, Kotlin + Jetpack Compose)
+
+          A small app that helps a Discord server track progress toward a goal of 30 real server boosts.
+
+          - It does NOT create or give boosts. Boosts come only from real members through Discord's official Server Boost feature.
+          - The boost count is updated manually. There is no Discord login, no token, no password, and no unofficial API.
+          - The "Open server invite" button just opens your official Discord invite link.
+
+          ## Edit your server details
+
+          1. `app/src/main/java/com/example/boosttracker/Config.kt`
+             - `DEFAULT_SERVER_NAME`: replace `[Server name]`
+             - `DEFAULT_INVITE_URL`: replace `[Discord invite URL]` (for example `https://discord.gg/xxxx`), or set `""` to hide the button
+          2. Or change them inside the app with the Settings button (no rebuild needed).
+
+          ## Build the APK
+
+          Android Studio:
+          1. File > Open > select this folder, wait for Gradle Sync.
+          2. Build > Build Bundle(s) / APK(s) > Build APK(s).
+          3. The APK is at `app/build/outputs/apk/debug/app-debug.apk`.
+
+          Command line (needs JDK 17 and Android SDK 34):
+          ```
+          gradle wrapper --gradle-version 8.7
+          ./gradlew assembleDebug
+          ```
+
+          To install on a phone, copy the APK over and allow "Install unknown apps" for your file manager.
+          For a release build use Build > Generate Signed Bundle / APK with your own keystore.
+          BT_EOF
+          mkdir -p BoostTracker/app
+          cat > BoostTracker/app/build.gradle.kts <<'BT_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.boosttracker"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.boosttracker"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = true
+                      proguardFiles(
+                          getDefaultProguardFile("proguard-android-optimize.txt"),
+                          "proguard-rules.pro"
+                      )
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+              buildFeatures {
+                  compose = true
+              }
+              composeOptions {
+                  kotlinCompilerExtensionVersion = "1.5.14"
+              }
+          }
+
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.activity:activity-compose:1.9.0")
+              implementation("androidx.core:core-ktx:1.13.1")
+          }
+          BT_EOF
+          mkdir -p BoostTracker/app
+          cat > BoostTracker/app/proguard-rules.pro <<'BT_EOF'
+          # No custom rules needed for this app.
+          BT_EOF
+          mkdir -p BoostTracker/app/src/main
+          cat > BoostTracker/app/src/main/AndroidManifest.xml <<'BT_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <application
+                  android:allowBackup="false"
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.BoostTracker">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          BT_EOF
+          mkdir -p BoostTracker/app/src/main/java/com/example/boosttracker
+          cat > BoostTracker/app/src/main/java/com/example/boosttracker/BoostStore.kt <<'BT_EOF'
+          package com.example.boosttracker
+
+          import android.content.Context
+
+          /** Stores only the server name, optional invite link and the manual boost count. Nothing else. */
+          class BoostStore(context: Context) {
+              private val prefs = context.getSharedPreferences("boost_tracker", Context.MODE_PRIVATE)
+
+              var serverName: String
+                  get() = prefs.getString("server_name", Config.DEFAULT_SERVER_NAME) ?: Config.DEFAULT_SERVER_NAME
+                  set(value) = prefs.edit().putString("server_name", value.trim()).apply()
+
+              var inviteUrl: String
+                  get() = prefs.getString("invite_url", Config.DEFAULT_INVITE_URL) ?: Config.DEFAULT_INVITE_URL
+                  set(value) = prefs.edit().putString("invite_url", value.trim()).apply()
+
+              var boostCount: Int
+                  get() = prefs.getInt("boost_count", 0)
+                  set(value) = prefs.edit().putInt("boost_count", value.coerceIn(0, 999)).apply()
+          }
+          BT_EOF
+          mkdir -p BoostTracker/app/src/main/java/com/example/boosttracker
+          cat > BoostTracker/app/src/main/java/com/example/boosttracker/Config.kt <<'BT_EOF'
+          package com.example.boosttracker
+
+          /** Edit these defaults, or change them later from the in-app Settings button. */
+          object Config {
+              const val GOAL = 30
+              const val DEFAULT_SERVER_NAME = "[Server name]"
+              // Leave empty ("") if you don't want an invite button.
+              const val DEFAULT_INVITE_URL = "[Discord invite URL]"
+          }
+          BT_EOF
+          mkdir -p BoostTracker/app/src/main/java/com/example/boosttracker
+          cat > BoostTracker/app/src/main/java/com/example/boosttracker/MainActivity.kt <<'BT_EOF'
+          package com.example.boosttracker
+
+          import android.content.ActivityNotFoundException
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.widget.Toast
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.text.KeyboardOptions
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material3.AlertDialog
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.Card
+          import androidx.compose.material3.LinearProgressIndicator
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.OutlinedButton
+          import androidx.compose.material3.OutlinedTextField
+          import androidx.compose.material3.Surface
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.input.KeyboardType
+          import androidx.compose.ui.unit.dp
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val store = BoostStore(applicationContext)
+                  setContent {
+                      MaterialTheme {
+                          Surface(modifier = Modifier.fillMaxSize()) {
+                              BoostScreen(store)
+                          }
+                      }
+                  }
+              }
+          }
+
+          private val ALLOWED_HOSTS = setOf("discord.gg", "discord.com", "www.discord.com", "discordapp.com")
+
+          /** Only opens https links that point to Discord's official invite domains. */
+          private fun isOfficialInvite(url: String): Boolean {
+              val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return false
+              return uri.scheme == "https" && uri.host?.lowercase() in ALLOWED_HOSTS
+          }
+
+          private fun openInvite(context: Context, url: String) {
+              if (!isOfficialInvite(url)) {
+                  Toast.makeText(context, "Invite link must be an official https Discord link.", Toast.LENGTH_LONG).show()
+                  return
+              }
+              try {
+                  context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+              } catch (e: ActivityNotFoundException) {
+                  Toast.makeText(context, "No app found to open the link.", Toast.LENGTH_LONG).show()
+              }
+          }
+
+          @Composable
+          fun BoostScreen(store: BoostStore) {
+              val context = LocalContext.current
+              var serverName by remember { mutableStateOf(store.serverName) }
+              var inviteUrl by remember { mutableStateOf(store.inviteUrl) }
+              var count by remember { mutableStateOf(store.boostCount) }
+              var showSettings by remember { mutableStateOf(false) }
+              var showSetCount by remember { mutableStateOf(false) }
+
+              val goal = Config.GOAL
+              val progress = (count.toFloat() / goal).coerceIn(0f, 1f)
+              val remaining = (goal - count).coerceAtLeast(0)
+
+              fun updateCount(newValue: Int) {
+                  count = newValue.coerceIn(0, 999)
+                  store.boostCount = count
+              }
+
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .verticalScroll(rememberScrollState())
+                      .padding(20.dp),
+                  verticalArrangement = Arrangement.spacedBy(16.dp)
+              ) {
+                  Row(
+                      modifier = Modifier.fillMaxWidth(),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.SpaceBetween
+                  ) {
+                      Text(
+                          text = serverName.ifBlank { "[Server name]" },
+                          style = MaterialTheme.typography.headlineMedium,
+                          modifier = Modifier.weight(1f)
+                      )
+                      TextButton(onClick = { showSettings = true }) { Text("Settings") }
+                  }
+
+                  Card(modifier = Modifier.fillMaxWidth()) {
+                      Column(
+                          modifier = Modifier.padding(20.dp),
+                          verticalArrangement = Arrangement.spacedBy(12.dp)
+                      ) {
+                          Text("Boost goal", style = MaterialTheme.typography.labelLarge)
+                          Text("$count / $goal", style = MaterialTheme.typography.displayMedium)
+                          LinearProgressIndicator(
+                              progress = { progress },
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .height(12.dp)
+                          )
+                          Text(
+                              text = if (count >= goal) "Goal reached! Thank you to everyone who boosted."
+                              else "$remaining more boost${if (remaining == 1) "" else "s"} to go (${(progress * 100).toInt()}%)",
+                              style = MaterialTheme.typography.bodyLarge
+                          )
+                      }
+                  }
+
+                  Text("Update the count manually", style = MaterialTheme.typography.titleMedium)
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                      OutlinedButton(onClick = { updateCount(count - 1) }, modifier = Modifier.weight(1f)) { Text("-1") }
+                      OutlinedButton(onClick = { updateCount(count + 1) }, modifier = Modifier.weight(1f)) { Text("+1") }
+                      OutlinedButton(onClick = { showSetCount = true }, modifier = Modifier.weight(1f)) { Text("Set...") }
+                  }
+
+                  if (inviteUrl.isNotBlank()) {
+                      Button(
+                          onClick = { openInvite(context, inviteUrl) },
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .height(56.dp)
+                      ) {
+                          Text("Open server invite")
+                      }
+                  }
+
+                  Text(
+                      text = "Opening the invite does not boost the server. Boosts come only from real members " +
+                          "using Discord's official Server Boost feature (Server name > Server Boost). " +
+                          "Check the real count in Discord and enter it here.",
+                      style = MaterialTheme.typography.bodySmall
+                  )
+                  Spacer(Modifier.height(8.dp))
+              }
+
+              if (showSettings) {
+                  var nameDraft by remember { mutableStateOf(serverName) }
+                  var urlDraft by remember { mutableStateOf(inviteUrl) }
+                  val urlError = urlDraft.isNotBlank() && !isOfficialInvite(urlDraft.trim())
+                  AlertDialog(
+                      onDismissRequest = { showSettings = false },
+                      title = { Text("Server details") },
+                      text = {
+                          Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                              OutlinedTextField(
+                                  value = nameDraft,
+                                  onValueChange = { nameDraft = it },
+                                  label = { Text("Server name") },
+                                  singleLine = true
+                              )
+                              OutlinedTextField(
+                                  value = urlDraft,
+                                  onValueChange = { urlDraft = it },
+                                  label = { Text("Invite URL (optional)") },
+                                  singleLine = true,
+                                  isError = urlError,
+                                  supportingText = {
+                                      if (urlError) Text("Use an https://discord.gg/... or https://discord.com/invite/... link")
+                                  },
+                                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+                              )
+                          }
+                      },
+                      confirmButton = {
+                          TextButton(
+                              enabled = !urlError,
+                              onClick = {
+                                  store.serverName = nameDraft
+                                  store.inviteUrl = urlDraft
+                                  serverName = store.serverName
+                                  inviteUrl = store.inviteUrl
+                                  showSettings = false
+                              }
+                          ) { Text("Save") }
+                      },
+                      dismissButton = { TextButton(onClick = { showSettings = false }) { Text("Cancel") } }
+                  )
+              }
+
+              if (showSetCount) {
+                  var draft by remember { mutableStateOf(count.toString()) }
+                  AlertDialog(
+                      onDismissRequest = { showSetCount = false },
+                      title = { Text("Set boost count") },
+                      text = {
+                          OutlinedTextField(
+                              value = draft,
+                              onValueChange = { draft = it.filter(Char::isDigit).take(3) },
+                              label = { Text("Current boosts") },
+                              singleLine = true,
+                              keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                          )
+                      },
+                      confirmButton = {
+                          TextButton(onClick = {
+                              updateCount(draft.toIntOrNull() ?: count)
+                              showSetCount = false
+                          }) { Text("Save") }
+                      },
+                      dismissButton = { TextButton(onClick = { showSetCount = false }) { Text("Cancel") } }
+                  )
+              }
+          }
+          BT_EOF
+          mkdir -p BoostTracker/app/src/main/res/values
+          cat > BoostTracker/app/src/main/res/values/strings.xml <<'BT_EOF'
+          <resources>
+              <string name="app_name">Boost Tracker</string>
+          </resources>
+          BT_EOF
+          mkdir -p BoostTracker/app/src/main/res/values
+          cat > BoostTracker/app/src/main/res/values/themes.xml <<'BT_EOF'
+          <resources>
+              <style name="Theme.BoostTracker" parent="android:Theme.Material.Light.NoActionBar" />
+          </resources>
+          BT_EOF
+          mkdir -p BoostTracker
+          cat > BoostTracker/build.gradle.kts <<'BT_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          BT_EOF
+          mkdir -p BoostTracker
+          cat > BoostTracker/gradle.properties <<'BT_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          BT_EOF
+          mkdir -p BoostTracker/gradle/wrapper
+          cat > BoostTracker/gradle/wrapper/gradle-wrapper.properties <<'BT_EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          BT_EOF
+          mkdir -p BoostTracker
+          cat > BoostTracker/settings.gradle.kts <<'BT_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "BoostTracker"
+          include(":app")
+          BT_EOF
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build debug APK
+        working-directory: BoostTracker
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BoostTracker-APK
+          path: BoostTracker/app/build/outputs/apk/debug/app-debug.apk
